@@ -24,6 +24,7 @@ public static class EmployeeEndpoints
         g.MapPost("", Create).RequireAuthorization("Hr");
         g.MapPut("/{id:int}", Update).RequireAuthorization("Hr");
         g.MapPost("/{id:int}/disable", Disable).RequireAuthorization("Hr");
+        g.MapPost("/{id:int}/cancel-disable", CancelScheduledDisable).RequireAuthorization("Hr");
         g.MapPost("/{id:int}/enable", Enable).RequireAuthorization("Hr");
     }
 
@@ -47,7 +48,8 @@ public static class EmployeeEndpoints
         e.EmergencyContactName, e.EmergencyContactPhone, e.EmergencyContactRelation,
         sensitive ? e.BankAccountHolder : null, sensitive ? e.BankName : null,
         sensitive ? e.BankAccountNumber : null, sensitive ? e.BankIfsc : null, sensitive ? e.TaxId : null,
-        Mappers.AvatarUrl(e.AvatarFile), Completeness(e), sensitive);
+        Mappers.AvatarUrl(e.AvatarFile), Completeness(e), sensitive,
+        e.ScheduledDisableDate, sensitive ? e.ScheduledDisableReason : null);
 
     /// <summary>Audit snapshot. Payroll identifiers are masked so the audit log never becomes a leak.</summary>
     private static object Snapshot(Employee e) => new
@@ -206,13 +208,13 @@ public static class EmployeeEndpoints
                 e.Id, e.EmployeeCode, e.FirstName, e.LastName, e.Email, e.Role, e.Designation,
                 e.DepartmentId, Department = e.Department != null ? e.Department.Name : null,
                 e.ManagerId, ManagerFirst = e.Manager != null ? e.Manager.FirstName : null, ManagerLast = e.Manager != null ? e.Manager.LastName : null,
-                e.EmploymentType, e.Location, e.JoinDate, e.IsActive, e.AvatarFile
+                e.EmploymentType, e.Location, e.JoinDate, e.IsActive, e.AvatarFile, e.ScheduledDisableDate
             }).ToListAsync(ct);
 
         var items = rows.Select(r => new EmployeeListItem(r.Id, r.EmployeeCode, (r.FirstName + " " + r.LastName).Trim(), r.Email,
             r.Role.ToString(), r.Designation, r.DepartmentId, r.Department, r.ManagerId,
             r.ManagerFirst is null ? null : (r.ManagerFirst + " " + r.ManagerLast).Trim(),
-            r.EmploymentType.ToString(), r.Location, r.JoinDate, r.IsActive, Mappers.AvatarUrl(r.AvatarFile))).ToList();
+            r.EmploymentType.ToString(), r.Location, r.JoinDate, r.IsActive, Mappers.AvatarUrl(r.AvatarFile), r.ScheduledDisableDate)).ToList();
         return Results.Ok(new PagedResult<EmployeeListItem>(items, total, p, ps));
     }
 
@@ -380,7 +382,12 @@ public static class EmployeeEndpoints
         return Results.Ok(ToDetail(fresh!, true));
     }
 
-    private static async Task<IResult> Disable(int id, ReasonRequest req, HrmDbContext db, ICurrentUser me, AuditService audit, CancellationToken ct)
+    /// <summary>
+    /// Disables an employee. If <see cref="DisableRequest.EffectiveDate"/> is a future date (org time zone),
+    /// the account stays active and is instead scheduled for the daily job to disable on that date - access
+    /// is not blocked immediately. Leaving it empty or today (or earlier) disables right away, as before.
+    /// </summary>
+    private static async Task<IResult> Disable(int id, DisableRequest req, HrmDbContext db, ICurrentUser me, AuditService audit, OrgClock clock, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.Reason)) return new Errors().Add("reason", "A reason is required to disable an employee.").ToResult();
         if (id == me.Id) return Problems.Forbidden("You cannot disable your own account.");
@@ -390,12 +397,40 @@ public static class EmployeeEndpoints
         if (!e.IsActive) return Problems.Conflict("This employee is already disabled.");
 
         var before = Snapshot(e);
+        var reason = req.Reason.Trim();
+
+        if (req.EffectiveDate is { } eff && eff > clock.Today)
+        {
+            e.ScheduledDisableDate = eff;
+            e.ScheduledDisableReason = reason;
+            audit.Record("employee.disable.scheduled", "Employee", e.Id, before, new { ScheduledDisableDate = eff, Reason = reason });
+            await db.SaveChangesAsync(ct);
+            return Results.Ok(ToDetail(e, true));
+        }
+
         e.IsActive = false;
         e.DisabledAt = DateTime.UtcNow;
-        e.DisabledReason = req.Reason.Trim();
+        e.DisabledReason = reason;
+        e.ScheduledDisableDate = null;
+        e.ScheduledDisableReason = null;
         var tokens = await db.RefreshTokens.Where(t => t.EmployeeId == id && t.RevokedAt == null).ToListAsync(ct);
         foreach (var t in tokens) t.RevokedAt = DateTime.UtcNow; // access is blocked immediately at next refresh / request
         audit.Record("employee.disable", "Employee", e.Id, before, new { IsActive = false, Reason = e.DisabledReason });
+        await db.SaveChangesAsync(ct);
+        return Results.Ok(ToDetail(e, true));
+    }
+
+    /// <summary>Cancels a pending scheduled disable (set via <see cref="Disable"/> with a future effective date) without touching current access.</summary>
+    private static async Task<IResult> CancelScheduledDisable(int id, HrmDbContext db, AuditService audit, CancellationToken ct)
+    {
+        var e = await LoadAsync(db, id, ct);
+        if (e is null) return Problems.NotFound("Employee not found.");
+        if (e.ScheduledDisableDate is null) return Problems.Conflict("This employee does not have a scheduled disable.");
+
+        var before = Snapshot(e);
+        e.ScheduledDisableDate = null;
+        e.ScheduledDisableReason = null;
+        audit.Record("employee.disable.cancel_scheduled", "Employee", e.Id, before, Snapshot(e));
         await db.SaveChangesAsync(ct);
         return Results.Ok(ToDetail(e, true));
     }
@@ -408,6 +443,8 @@ public static class EmployeeEndpoints
         e.IsActive = true;
         e.DisabledAt = null;
         e.DisabledReason = null;
+        e.ScheduledDisableDate = null;
+        e.ScheduledDisableReason = null;
         audit.Record("employee.enable", "Employee", e.Id);
         await db.SaveChangesAsync(ct);
         return Results.Ok(ToDetail(e, true));

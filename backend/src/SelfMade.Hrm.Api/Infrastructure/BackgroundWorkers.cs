@@ -125,6 +125,26 @@ public class DailyJobsWorker(IServiceScopeFactory scopes, OrgClock clock, IConfi
         if (await db.AuditEvents.AnyAsync(a => a.Action == "job.daily" && a.EntityId == marker, ct)) return;
 
         var corr = $"daily-{today:yyyyMMdd}";
+
+        // 0) Apply disables that were scheduled for today or earlier.
+        var due = await db.Employees.Where(e => e.IsActive && e.ScheduledDisableDate != null && e.ScheduledDisableDate <= today).ToListAsync(ct);
+        foreach (var emp in due)
+        {
+            emp.IsActive = false;
+            emp.DisabledAt = DateTime.UtcNow;
+            emp.DisabledReason = emp.ScheduledDisableReason;
+            emp.ScheduledDisableDate = null;
+            emp.ScheduledDisableReason = null;
+            var tokens = await db.RefreshTokens.Where(t => t.EmployeeId == emp.Id && t.RevokedAt == null).ToListAsync(ct);
+            foreach (var t in tokens) t.RevokedAt = DateTime.UtcNow;
+            db.AuditEvents.Add(new AuditEvent
+            {
+                Action = "employee.disable", EntityType = "Employee", EntityId = emp.Id.ToString(),
+                AfterJson = System.Text.Json.JsonSerializer.Serialize(new { IsActive = false, Reason = emp.DisabledReason, Scheduled = true })
+            });
+        }
+        if (due.Count > 0) await db.SaveChangesAsync(ct);
+
         var people = await db.Employees.Where(e => e.IsActive).ToListAsync(ct);
 
         // 1) Daily leave digest for HR (everyone) and managers (direct reports).

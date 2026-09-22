@@ -5,7 +5,7 @@ import { ApiError, get, post, put } from '../../lib/api'
 import { useAuth } from '../../lib/auth'
 import { useToast } from '../../lib/toast'
 import { useDebounced, useDepartments, useRefreshData } from '../../lib/hooks'
-import { formatDate, roleLabel } from '../../lib/format'
+import { formatDate, roleLabel, todayIso } from '../../lib/format'
 import type { EmployeeDetail, EmployeeListItem, Paged } from '../../lib/types'
 import { Avatar, Badge, Button, Card, ConfirmDialog, EmptyState, ErrorState, Field, FormError, Overlay, PageHead, Pagination, SkeletonRows } from '../../components/ui'
 
@@ -36,7 +36,9 @@ export default function ManagePeoplePage() {
   const [status, setStatus] = useState('active')
   const [page, setPage] = useState(1)
   const [editing, setEditing] = useState<number | 'new' | null>(null)
-  const [toggle, setToggle] = useState<EmployeeListItem | null>(null)
+  const [disabling, setDisabling] = useState<EmployeeListItem | null>(null)
+  const [enabling, setEnabling] = useState<EmployeeListItem | null>(null)
+  const [cancelling, setCancelling] = useState<EmployeeListItem | null>(null)
   const refresh = useRefreshData()
   const toast = useToast()
   const debounced = useDebounced(search)
@@ -86,12 +88,22 @@ export default function ManagePeoplePage() {
                       <td data-label="Department">{e.department ?? '-'}</td>
                       <td data-label="Manager">{e.manager ?? '-'}</td>
                       <td data-label="Joined" className="nowrap">{formatDate(e.joinDate)}</td>
-                      <td data-label="Status">{e.isActive ? <Badge tone="success">Active</Badge> : <Badge tone="danger">Disabled</Badge>}</td>
+                      <td data-label="Status">
+                        <div className="stack" style={{ gap: 4 }}>
+                          {e.isActive ? <Badge tone="success">Active</Badge> : <Badge tone="danger">Disabled</Badge>}
+                          {e.scheduledDisableDate && <Badge tone="warning">Disabling {formatDate(e.scheduledDisableDate, false)}</Badge>}
+                        </div>
+                      </td>
                       {isHr && (
                         <td className="nowrap">
                           <div className="row gap-sm">
                             <Button size="sm" onClick={() => setEditing(e.id)}>Edit</Button>
-                            <Button size="sm" variant={e.isActive ? 'danger-ghost' : 'secondary'} onClick={() => setToggle(e)}>{e.isActive ? 'Disable' : 'Enable'}</Button>
+                            {e.isActive ? (
+                              <Button size="sm" variant="danger-ghost" onClick={() => setDisabling(e)}>{e.scheduledDisableDate ? 'Reschedule' : 'Disable'}</Button>
+                            ) : (
+                              <Button size="sm" onClick={() => setEnabling(e)}>Enable</Button>
+                            )}
+                            {e.scheduledDisableDate && <Button size="sm" onClick={() => setCancelling(e)}>Cancel</Button>}
                           </div>
                         </td>
                       )}
@@ -105,23 +117,85 @@ export default function ManagePeoplePage() {
       </Card>
 
       {editing !== null && isHr && <EmployeeDrawer id={editing} onClose={() => setEditing(null)} onSaved={() => { refresh(); toast.success('Employee saved.') }} />}
-      {toggle && (
+      {disabling && (
+        <DisableDialog
+          employee={disabling}
+          onClose={() => setDisabling(null)}
+          onDone={(scheduled) => { refresh(); toast.success(scheduled ? 'Disable scheduled.' : 'Employee disabled.') }}
+        />
+      )}
+      {enabling && (
         <ConfirmDialog
-          title={toggle.isActive ? `Disable ${toggle.name}?` : `Enable ${toggle.name}?`}
-          message={toggle.isActive ? 'They will be signed out and unable to log in. Their history is kept.' : 'They will be able to sign in again.'}
-          confirmLabel={toggle.isActive ? 'Disable' : 'Enable'}
-          tone={toggle.isActive ? 'danger' : 'primary'}
-          reasonLabel={toggle.isActive ? 'Reason' : undefined}
-          reasonRequired={toggle.isActive}
-          onClose={() => setToggle(null)}
-          onConfirm={async (reason) => {
-            await post(`/employees/${toggle.id}/${toggle.isActive ? 'disable' : 'enable'}`, { reason })
+          title={`Enable ${enabling.name}?`}
+          message="They will be able to sign in again."
+          confirmLabel="Enable"
+          onClose={() => setEnabling(null)}
+          onConfirm={async () => {
+            await post(`/employees/${enabling.id}/enable`)
             refresh()
-            toast.success(toggle.isActive ? 'Employee disabled.' : 'Employee enabled.')
+            toast.success('Employee enabled.')
+          }}
+        />
+      )}
+      {cancelling && (
+        <ConfirmDialog
+          title="Cancel scheduled disable?"
+          message={<>{cancelling.name} will stay active and will <strong>not</strong> be disabled on {formatDate(cancelling.scheduledDisableDate, false)}.</>}
+          confirmLabel="Cancel the disable"
+          onClose={() => setCancelling(null)}
+          onConfirm={async () => {
+            await post(`/employees/${cancelling.id}/cancel-disable`)
+            refresh()
+            toast.success('Scheduled disable cancelled.')
           }}
         />
       )}
     </div>
+  )
+}
+
+function DisableDialog({ employee, onClose, onDone }: { employee: EmployeeListItem; onClose: () => void; onDone: (scheduled: boolean) => void }) {
+  const [reason, setReason] = useState('')
+  const [effectiveDate, setEffectiveDate] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+  const [touched, setTouched] = useState(false)
+  const fe = error instanceof ApiError ? error : null
+  const scheduled = effectiveDate !== '' && effectiveDate > todayIso()
+
+  async function submit() {
+    setTouched(true)
+    if (!reason.trim()) return
+    setBusy(true)
+    setError(null)
+    try {
+      await post(`/employees/${employee.id}/disable`, { reason: reason.trim(), effectiveDate: effectiveDate || null })
+      onDone(scheduled)
+      onClose()
+    } catch (e) {
+      setError(e)
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Overlay
+      title={`Disable ${employee.name}?`}
+      variant="modal"
+      onClose={onClose}
+      footer={<><Button onClick={onClose} disabled={busy}>Cancel</Button><Button variant="danger" loading={busy} onClick={submit}>{scheduled ? 'Schedule disable' : 'Disable now'}</Button></>}
+    >
+      <div className="stack">
+        <p className="small muted">{scheduled ? 'Their account stays active until the effective date, then they are signed out and unable to log in.' : 'Leave the effective date empty to sign them out and disable access immediately.'}</p>
+        <Field label="Reason" required error={fe?.fieldError('reason') ?? (touched && !reason.trim() ? 'This is required.' : undefined)}>
+          <textarea className="textarea" value={reason} onChange={(e) => setReason(e.target.value)} maxLength={500} />
+        </Field>
+        <Field label="Effective date (optional)" hint="Leave blank to disable immediately." error={fe?.fieldError('effectiveDate')}>
+          <input className="input" type="date" min={todayIso()} value={effectiveDate} onChange={(e) => setEffectiveDate(e.target.value)} />
+        </Field>
+        <FormError error={fe && Object.keys(fe.errors).length === 0 ? error : null} />
+      </div>
+    </Overlay>
   )
 }
 

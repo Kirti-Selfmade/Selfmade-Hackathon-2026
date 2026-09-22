@@ -331,7 +331,7 @@ table.table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .timeline li.t-Approved::before { background: var(--success); }
 .timeline li.t-Rejected::before, .timeline li.t-Deleted::before { background: var(--danger); }
 .timeline li.t-Cancelled::before { background: var(--muted); }
-.timeline li.t-Edited::before { background: var(--info); }
+.timeline li.t-Edited::before, .timeline li.t-Recalculated::before { background: var(--info); }
 .kv { display: grid; grid-template-columns: 150px 1fr; gap: 10px 16px; font-size: 14.5px; }
 .kv dt { color: var(--muted); font-weight: 500; }
 .kv dd { margin: 0; font-weight: 500; overflow-wrap: anywhere; }

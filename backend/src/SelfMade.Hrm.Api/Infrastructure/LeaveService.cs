@@ -164,4 +164,61 @@ public class LeaveService(HrmDbContext db, OrgClock clock, IConfiguration cfg)
 
         return results;
     }
+
+    /// <summary>
+    /// Re-counts chargeable days for every pending / approved leave application that overlaps any of the given
+    /// dates, because a holiday or office-off day was added, moved or removed after those requests were made.
+    /// Approved leave has its balance usage adjusted by the delta; the employee is notified either way.
+    /// Caller must already have committed the holiday change (so the recount sees the new calendar) and
+    /// must SaveChanges afterwards.
+    /// </summary>
+    public async Task<int> RecalculateForDatesAsync(IReadOnlyCollection<DateOnly> affectedDates, NotificationService notify, AuditService audit, CancellationToken ct)
+    {
+        if (affectedDates.Count == 0) return 0;
+        var min = affectedDates.Min();
+        var max = affectedDates.Max();
+
+        var candidates = await db.LeaveApplications
+            .Include(a => a.Employee)
+            .Include(a => a.LeaveType)
+            .Where(a => !a.IsDeleted && (a.Status == LeaveStatus.Pending || a.Status == LeaveStatus.Approved)
+                        && a.StartDate <= max && a.EndDate >= min)
+            .ToListAsync(ct);
+        var apps = candidates.Where(a => affectedDates.Any(d => d >= a.StartDate && d <= a.EndDate)).ToList();
+        if (apps.Count == 0) return 0;
+
+        var touched = 0;
+        foreach (var app in apps)
+        {
+            var offDays = await OffDaysAsync(app.StartDate, app.EndDate, ct);
+            var newDays = CountDays(app.StartDate, app.EndDate, app.IsHalfDay, offDays);
+            if (newDays == app.Days) continue;
+
+            var oldDays = app.Days;
+            app.Days = newDays;
+            touched++;
+
+            if (app.Status == LeaveStatus.Approved && app.LeaveType is { TracksBalance: true } type)
+            {
+                var bal = await EnsureBalanceAsync(app.EmployeeId, type, app.StartDate.Year, ct);
+                bal.Used = Math.Max(0, bal.Used + (newDays - oldDays));
+            }
+
+            db.LeaveEvents.Add(new LeaveEvent
+            {
+                LeaveApplicationId = app.Id, Kind = "Recalculated",
+                Comment = $"Day count updated from {oldDays} to {newDays} after a change to the holiday calendar."
+            });
+            audit.Record("leave.recalculate", "LeaveApplication", app.Id, new { Days = oldDays }, new { Days = newDays });
+
+            if (app.Employee is not null)
+            {
+                notify.Notify(app.Employee, "Leave request recalculated",
+                    $"Your {app.LeaveType?.Name ?? "leave"} request for {app.StartDate:dd MMM} - {app.EndDate:dd MMM} now counts as {newDays} day(s) (was {oldDays}) after a change to the holiday calendar.",
+                    "/leaves");
+            }
+        }
+
+        return touched;
+    }
 }

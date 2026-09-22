@@ -42,6 +42,7 @@ export interface EmployeeListItem {
   joinDate: string
   isActive: boolean
   avatarUrl: string | null
+  scheduledDisableDate: string | null
 }
 
 export interface DirectoryItem {
@@ -89,6 +90,8 @@ export interface EmployeeDetail {
   avatarUrl: string | null
   profileCompleteness: number
   sensitiveVisible: boolean
+  scheduledDisableDate: string | null
+  scheduledDisableReason: string | null
 }
 
 export interface Department {

@@ -179,7 +179,7 @@ public static partial class OrgEndpoints
         return e;
     }
 
-    private static async Task<IResult> CreateHoliday(HolidayRequest req, HrmDbContext db, AuditService audit, CancellationToken ct)
+    private static async Task<IResult> CreateHoliday(HolidayRequest req, HrmDbContext db, AuditService audit, LeaveService leaves, NotificationService notify, CancellationToken ct)
     {
         var errors = ValidateHoliday(req);
         if (errors.Any) return errors.ToResult();
@@ -189,11 +189,13 @@ public static partial class OrgEndpoints
         db.Holidays.Add(h);
         await db.SaveChangesAsync(ct);
         audit.Record("holiday.create", "Holiday", h.Id, null, ToDto(h));
+        // Existing requests that span this date may now count fewer chargeable days.
+        await leaves.RecalculateForDatesAsync([h.Date], notify, audit, ct);
         await db.SaveChangesAsync(ct);
         return Results.Created($"/api/v1/holidays/{h.Id}", ToDto(h));
     }
 
-    private static async Task<IResult> UpdateHoliday(int id, HolidayRequest req, HrmDbContext db, AuditService audit, CancellationToken ct)
+    private static async Task<IResult> UpdateHoliday(int id, HolidayRequest req, HrmDbContext db, AuditService audit, LeaveService leaves, NotificationService notify, CancellationToken ct)
     {
         var errors = ValidateHoliday(req);
         if (errors.Any) return errors.ToResult();
@@ -201,21 +203,30 @@ public static partial class OrgEndpoints
         if (h is null) return Problems.NotFound("Holiday not found.");
         if (await db.Holidays.AnyAsync(x => x.Date == req.Date && x.Id != id, ct)) return new Errors().Add("date", "A holiday / office-off day already exists on this date.").ToResult();
 
+        var oldDate = h.Date;
         var before = ToDto(h);
         h.Name = req.Name!.Trim();
         h.Date = req.Date!.Value;
         if (Enum.TryParse<HolidayKind>(req.Kind, true, out var k)) h.Kind = k;
         audit.Record("holiday.update", "Holiday", h.Id, before, ToDto(h));
         await db.SaveChangesAsync(ct);
+        // Requests touching either the old or the new date may need their day count re-checked.
+        var affected = oldDate == h.Date ? new[] { h.Date } : new[] { oldDate, h.Date };
+        await leaves.RecalculateForDatesAsync(affected, notify, audit, ct);
+        await db.SaveChangesAsync(ct);
         return Results.Ok(ToDto(h));
     }
 
-    private static async Task<IResult> DeleteHoliday(int id, HrmDbContext db, AuditService audit, CancellationToken ct)
+    private static async Task<IResult> DeleteHoliday(int id, HrmDbContext db, AuditService audit, LeaveService leaves, NotificationService notify, CancellationToken ct)
     {
         var h = await db.Holidays.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (h is null) return Problems.NotFound("Holiday not found.");
+        var removedDate = h.Date;
         audit.Record("holiday.delete", "Holiday", h.Id, ToDto(h));
         db.Holidays.Remove(h);
+        await db.SaveChangesAsync(ct);
+        // The date is a working day again, so requests spanning it may now count more chargeable days.
+        await leaves.RecalculateForDatesAsync([removedDate], notify, audit, ct);
         await db.SaveChangesAsync(ct);
         return Results.NoContent();
     }

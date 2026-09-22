@@ -62,6 +62,10 @@ public class Employee
     public DateTime? DisabledAt { get; set; }
     [MaxLength(500)] public string? DisabledReason { get; set; }
 
+    /// <summary>When set, the daily job disables this employee once <see cref="ScheduledDisableDate"/> arrives (org time zone).</summary>
+    public DateOnly? ScheduledDisableDate { get; set; }
+    [MaxLength(500)] public string? ScheduledDisableReason { get; set; }
+
     [Timestamp] public byte[] RowVersion { get; set; } = [];
 
     public string FullName => $"{FirstName} {LastName}".Trim();

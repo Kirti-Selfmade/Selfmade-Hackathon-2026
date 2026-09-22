@@ -15,7 +15,8 @@ public record AuthResponse(string AccessToken, string RefreshToken, int ExpiresI
 public record EmployeeListItem(
     int Id, string EmployeeCode, string Name, string Email, string Role, string? Designation,
     int? DepartmentId, string? Department, int? ManagerId, string? Manager,
-    string EmploymentType, string? Location, DateOnly JoinDate, bool IsActive, string? AvatarUrl);
+    string EmploymentType, string? Location, DateOnly JoinDate, bool IsActive, string? AvatarUrl,
+    DateOnly? ScheduledDisableDate);
 
 public record DirectoryItem(int Id, string Name, string Email, string? Phone, string? Designation, string? Department, string? Manager, string? Location, string? AvatarUrl);
 
@@ -26,7 +27,8 @@ public record EmployeeDetail(
     string? Gender, string? Phone, string? LocalAddress, string? PermanentAddress, string? FatherName,
     string? EmergencyContactName, string? EmergencyContactPhone, string? EmergencyContactRelation,
     string? BankAccountHolder, string? BankName, string? BankAccountNumber, string? BankIfsc, string? TaxId,
-    string? AvatarUrl, int ProfileCompleteness, bool SensitiveVisible);
+    string? AvatarUrl, int ProfileCompleteness, bool SensitiveVisible,
+    DateOnly? ScheduledDisableDate, string? ScheduledDisableReason);
 
 public record EmployeeUpsertRequest(
     string? EmployeeCode, string? FirstName, string? LastName, string? Email, string? Role,
@@ -41,6 +43,7 @@ public record UpdateProfileRequest(
     string? EmergencyContactName, string? EmergencyContactPhone, string? EmergencyContactRelation);
 
 public record ReasonRequest(string? Reason);
+public record DisableRequest(string? Reason, DateOnly? EffectiveDate);
 
 // ---------- Organisation ----------
 public record DepartmentDto(int Id, string Name, string? Description, bool IsActive, int EmployeeCount);
