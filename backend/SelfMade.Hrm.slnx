@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/SelfMade.Hrm.Api/SelfMade.Hrm.Api.csproj" />
+  <Project Path="tests/SelfMade.Hrm.Tests/SelfMade.Hrm.Tests.csproj" />
+</Solution>
